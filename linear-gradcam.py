@@ -11,6 +11,8 @@ from torchvision import models
 def get_options():
     parser = argparse.ArgumentParser()
     parser.add_argument('--file', type=str, help='File path to an image')
+    parser.add_argument('--mode', type=str, default='linear-gradcam', help='Choose CAM mode: linear-gradcam | gradcam')
+    parser.add_argument('--on_input', action='store_true', default=False, help='Extract CAM from the input image')
     parser.add_argument('--layer', type=str, help='Network layer to extract CAM from')
     parser.add_argument('--index', type=int, help='Class index')
     parser.add_argument('--cuda', action='store_true', default=False, help='Use CUDA for computation')
@@ -26,38 +28,35 @@ def get_options():
 
 def get_activations(activation_list):
     def forward_hook(module, input, output):
-        print(module)
         activation_list.append(output.cpu().detach())
     return forward_hook
 
 def get_gradients(gradient_list):
     def backward_hook(module, grad_input, grad_output):
-        print(module)
         gradient_list.append(grad_output[0].cpu().detach())
     return backward_hook
 
 if __name__ == '__main__':
     opt = get_options()
-
+    layer = opt.layer
     model = models.resnet50(pretrained=True)
     model.eval()
     mean = (0.485, 0.456, 0.406)
     std = (0.229, 0.224, 0.225)
 
-    layer = opt.layer
-    index = opt.index
-    activation_list = []
-    gradient_list = []
-
-    for name, module in model.named_modules():
-        if layer == name:
-            print('Registering hooks on ' + layer)
-            forward_handle = module.register_forward_hook(get_activations(activation_list))
-            backward_handle = module.register_backward_hook(get_gradients(gradient_list))
-            break
-    else:
-        print('Layer not found')
-        exit()
+    if not opt.on_input:
+        activation_list = []
+        gradient_list = []
+        for name, module in model.named_modules():
+            if layer == name:
+                print('Registering hooks on ' + layer)
+                print(module)
+                forward_handle = module.register_forward_hook(get_activations(activation_list))
+                backward_handle = module.register_backward_hook(get_gradients(gradient_list))
+                break
+        else:
+            print('Layer not found')
+            exit()
 
     image = Image.open(opt.file).convert('RGB')
     image_tensor = transforms.functional.to_tensor(image)
@@ -66,38 +65,42 @@ if __name__ == '__main__':
         transforms.ToTensor(),
         transforms.Normalize(mean, std)
     ])
-    image = transform(image).unsqueeze_(0).requires_grad_(True)
+    image = transform(image).unsqueeze(0)
+    image.requires_grad_(True)
 
     if opt.cuda:
         model.cuda()
-        score = model.forward(image.cuda())
-    else:
-        score = model.forward(image)
+        image = image.cuda()
+        image.retain_grad()
 
-    if index == None:
-        index = torch.argmax(score)
+    score = model.forward(image)
+
+    if opt.index == None:
+        opt.index = torch.argmax(score)
     one_hot = torch.zeros(score.size()).cuda()
-    one_hot[0][index] = 1
+    one_hot[0][opt.index] = 1
 
     model.zero_grad()
     score.backward(one_hot)
 
-    activations = activation_list[0].squeeze(0)
-    gradients = gradient_list[0].squeeze(0)
-    print(activations.__class__)
-    print(activations.shape)
-    print(activations)
-    print(gradients.__class__)
-    print(gradients.shape)
-    print(gradients)
+    if opt.on_input:
+        activations = image.cpu().detach().squeeze(0)
+        gradients = image.grad.cpu().detach().squeeze(0)
+    else:
+        activations = activation_list[0].squeeze(0)
+        gradients = gradient_list[0].squeeze(0)
 
-    weights = torch.mean(gradients, dim=(1, 2), keepdim=True)
-    cam = nn.functional.relu(torch.sum(weights * activations, dim=0, keepdim=True))
+    print(activations.shape)
+    print(gradients.shape)
+
+    if opt.mode == 'linear-gradcam':
+        cam = torch.sum(gradients * activations, dim=0, keepdim=True)
+    elif opt.mode == 'gradcam':
+        weights = torch.mean(gradients, dim=(1, 2), keepdim=True)
+        cam = nn.functional.relu(torch.sum(weights * activations, dim=0, keepdim=True))
+
     cam = cam - torch.min(cam)
     cam = cam / torch.max(cam)
-    print(cam.__class__)
-    print(cam.shape)
-    print(cam)
     transform = transforms.Compose([
         transforms.ToPILImage(),
         transforms.Resize(image_tensor.shape[1:], interpolation=Image.BICUBIC)
@@ -105,8 +108,8 @@ if __name__ == '__main__':
     cam = cv2.applyColorMap(numpy.array(transform(cam)), cv2.COLORMAP_JET)
     cam = cv2.cvtColor(cam, cv2.COLOR_BGR2RGB)
     cam = transforms.functional.to_tensor(cam)
-    utils.save_image(cam, 'cam.jpg')
+    utils.save_image(cam, opt.mode + '.jpg')
 
     heatmap = image_tensor + cam
     heatmap = heatmap / torch.max(heatmap)
-    utils.save_image(heatmap, 'heatmap.jpg')
+    utils.save_image(heatmap, opt.mode + '_heatmap.jpg')
