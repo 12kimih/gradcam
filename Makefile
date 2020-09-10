@@ -1,2 +1,2 @@
 clean:
-	rm -f *cam.jpg *heatmap.jpg
+	rm -f output/*
