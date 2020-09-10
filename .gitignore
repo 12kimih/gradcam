@@ -140,4 +140,6 @@ cython_debug/
 # <<< Python <<<
 
 # >>> Project >>>
+*cam.jpg
+*heatmap.jpg
 # <<< Project <<<

@@ -10,9 +10,8 @@ from torchvision import models
 
 def get_options():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--file', type=str, help='File path to an image')
-    parser.add_argument('--mode', type=str, default='linear-gradcam', help='Choose CAM mode: linear-gradcam | gradcam')
-    parser.add_argument('--on_input', action='store_true', default=False, help='Extract CAM from the input image')
+    parser.add_argument('--dataset', type=str, help='Path to the dataset')
+    parser.add_argument('--mode', type=int, default=0, help='Choose GradCAM mode: 0(element) | 1(plane) | 2(depth) | 3(avgpool) | 4(maxpool)')
     parser.add_argument('--layer', type=str, help='Network layer to extract CAM from')
     parser.add_argument('--index', type=int, help='Class index')
     parser.add_argument('--cuda', action='store_true', default=False, help='Use CUDA for computation')
@@ -39,12 +38,24 @@ def get_gradients(gradient_list):
 if __name__ == '__main__':
     opt = get_options()
     layer = opt.layer
+
     model = models.resnet50(pretrained=True)
     model.eval()
     mean = (0.485, 0.456, 0.406)
     std = (0.229, 0.224, 0.225)
 
-    if not opt.on_input:
+    if opt.mode == 0:
+        mode_name = 'element'
+    elif opt.mode == 1:
+        mode_name = 'plane'
+    elif opt.mode == 2:
+        mode_name = 'depth'
+    elif opt.mode == 3:
+        mode_name = 'avgpool'
+    elif opt.mode == 4:
+        mode_name = 'maxpool'
+
+    if layer != 'input':
         activation_list = []
         gradient_list = []
         for name, module in model.named_modules():
@@ -58,7 +69,7 @@ if __name__ == '__main__':
             print('Layer not found')
             exit()
 
-    image = Image.open(opt.file).convert('RGB')
+    image = Image.open(opt.dataset).convert('RGB')
     image_tensor = transforms.functional.to_tensor(image)
     transform = transforms.Compose([
         transforms.Resize((224, 224), interpolation=Image.BICUBIC),
@@ -77,13 +88,17 @@ if __name__ == '__main__':
 
     if opt.index == None:
         opt.index = torch.argmax(score)
-    one_hot = torch.zeros(score.size()).cuda()
+
+    if opt.cuda:
+        one_hot = torch.zeros(score.size()).cuda()
+    else:
+        one_hot = torch.zeros(score.size())
     one_hot[0][opt.index] = 1
 
     model.zero_grad()
     score.backward(one_hot)
 
-    if opt.on_input:
+    if layer == 'input' :
         activations = image.cpu().detach().squeeze(0)
         gradients = image.grad.cpu().detach().squeeze(0)
     else:
@@ -93,10 +108,19 @@ if __name__ == '__main__':
     print(activations.shape)
     print(gradients.shape)
 
-    if opt.mode == 'linear-gradcam':
-        cam = torch.sum(gradients * activations, dim=0, keepdim=True)
-    elif opt.mode == 'gradcam':
+    if opt.mode == 0:
+        cam = nn.functional.relu(torch.sum(gradients * activations, dim=0, keepdim=True))
+    elif opt.mode == 1:
         weights = torch.mean(gradients, dim=(1, 2), keepdim=True)
+        cam = nn.functional.relu(torch.sum(weights * activations, dim=0, keepdim=True))
+    elif opt.mode == 2:
+        weights = torch.mean(gradients, dim=0, keepdim=True)
+        cam = nn.functional.relu(torch.sum(weights * activations, dim=0, keepdim=True))
+    elif opt.mode == 3:
+        weights = nn.functional.avg_pool2d(gradients, 3, stride=1, padding=1)
+        cam = nn.functional.relu(torch.sum(weights * activations, dim=0, keepdim=True))
+    elif opt.mode == 4:
+        weights = nn.functional.max_pool2d(gradients, 3, stride=1, padding=1)
         cam = nn.functional.relu(torch.sum(weights * activations, dim=0, keepdim=True))
 
     cam = cam - torch.min(cam)
@@ -108,8 +132,8 @@ if __name__ == '__main__':
     cam = cv2.applyColorMap(numpy.array(transform(cam)), cv2.COLORMAP_JET)
     cam = cv2.cvtColor(cam, cv2.COLOR_BGR2RGB)
     cam = transforms.functional.to_tensor(cam)
-    utils.save_image(cam, opt.mode + '.jpg')
+    utils.save_image(cam, mode_name + '-cam.jpg')
 
     heatmap = image_tensor + cam
     heatmap = heatmap / torch.max(heatmap)
-    utils.save_image(heatmap, opt.mode + '_heatmap.jpg')
+    utils.save_image(heatmap, mode_name + '-heatmap.jpg')
